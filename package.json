@@ -3,8 +3,8 @@
 	"version": "1.0.0",
 	"description": "Analyze nginx access logs to detect attackers vs legitimate visitors",
 	"scripts": {
-		"start": "npx serve public",
-		"dev": "npx serve public"
+		"start": "npx serve",
+		"dev": "npx serve"
 	},
 	"keywords": [
 		"nginx",
