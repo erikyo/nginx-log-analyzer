@@ -1,10 +1,17 @@
 {
-  "name": "${PROJECT_NAME}",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "private": true
+	"name": "nginx-log-analyzer",
+	"version": "1.0.0",
+	"description": "Analyze nginx access logs to detect attackers vs legitimate visitors",
+	"scripts": {
+		"start": "npx serve public",
+		"dev": "npx serve public"
+	},
+	"keywords": [
+		"nginx",
+		"logs",
+		"security",
+		"analyzer",
+		"ip"
+	],
+	"license": "MIT"
 }
