@@ -10,11 +10,15 @@ import { analyze } from "./parser.js";
   let currentPage = 0;
   let expandedIPs = new Set();
   let geoLookupRunId = 0;
+  let subnetHostnameLookupRunId = 0;
+  let subnetHostnames = {};
   const PAGE_SIZE = 50;
   const GEO_BATCH_SIZE = 60;
   const GEO_BATCH_DELAY_MS = 60000;
   const GEO_REQUEST_DELAY_MS = Math.ceil(GEO_BATCH_DELAY_MS / GEO_BATCH_SIZE);
   const GEO_ENDPOINT = 'https://free.freeipapi.com/api/json/';
+  const DNS_ENDPOINT = 'https://dns.google/resolve';
+  const SUBNET_HOSTNAME_CANDIDATE_LIMIT = 10;
   const geoCacheReady = registerGeoCacheWorker();
 
   async function registerGeoCacheWorker() {
@@ -73,9 +77,11 @@ import { analyze } from "./parser.js";
     try {
       analysisData = analyze(text);
       geoData = {};
+      subnetHostnames = {};
       expandedIPs = new Set();
       renderResults();
       startGeoLookup();
+      startSubnetHostnameLookup();
     } catch (err) {
       hideLoading();
       alert('Analysis failed: ' + err.message);
@@ -299,21 +305,19 @@ import { analyze } from "./parser.js";
   // SUBNETS
   // ───────────────────────────────────────────────
   function renderSubnets() {
-    const subnets = analysisData.subnets;
-    const maxReq = Math.max(...subnets.map(s => s.requests));
-    document.getElementById('subnet-grid').innerHTML = subnets.slice(0, 100).filter(
-      (i) => i.ips.length > 1
-    ).sort(
-      // sort by ips.length (descending)
-      (a,b) => b.ips.length - a.ips.length
-    ).map(s => {
+    const subnets = getVisibleSubnets();
+    const maxReq = Math.max(1, ...subnets.map(s => s.requests));
+    document.getElementById('subnet-grid').innerHTML = subnets.map(s => {
       const scanColor = s.scanPatterns > 0 ? 'var(--red)' : 'var(--text-dim)';
       const flags = subnetFlags(s);
       return `
     <div class="subnet-card">
       <div class="subnet-title">
         <span class="subnet-flags">${flags}</span>
-        <h4>${s.subnet}</h4>
+        <div class="subnet-heading">
+          <h4>${s.subnet}</h4>
+          <div class="subnet-hostname">${subnetHostnameLabel(s)}</div>
+        </div>
       </div>
       <div class="subnet-meta">
         <span><b>${fmt(s.requests)}</b> reqs</span>
@@ -327,6 +331,81 @@ import { analyze } from "./parser.js";
       </div>
     </div>`;
     }).join('');
+  }
+
+  async function startSubnetHostnameLookup() {
+    if (!analysisData) return;
+    const runId = ++subnetHostnameLookupRunId;
+    const subnets = getVisibleSubnets();
+
+    for (const subnet of subnets) {
+      if (runId !== subnetHostnameLookupRunId) return;
+      if (subnetHostnames[subnet.subnet]) continue;
+
+      subnetHostnames[subnet.subnet] = { status: 'loading', hostname: '' };
+      renderSubnets();
+
+      const hostname = await fetchSubnetHostname(subnet);
+      if (runId !== subnetHostnameLookupRunId) return;
+
+      subnetHostnames[subnet.subnet] = {
+        status: hostname ? 'found' : 'missing',
+        hostname
+      };
+      renderSubnets();
+    }
+  }
+
+  function getVisibleSubnets() {
+    return analysisData.subnets.slice(0, 100).filter(
+      (i) => i.ips.length > 1
+    ).sort(
+      (a,b) => b.ips.length - a.ips.length
+    );
+  }
+
+  function subnetHostnameLabel(subnet) {
+    const result = subnetHostnames[subnet.subnet];
+    if (!result || result.status === 'loading') return '<span class="geo-loading">hostname lookup...</span>';
+    if (!result.hostname) return '<span class="geo-loading">no hostname</span>';
+    return `<span title="${escAttr(result.hostname)}">${escHtml(result.hostname)}</span>`;
+  }
+
+  async function fetchSubnetHostname(subnet) {
+    const candidates = [
+      subnetBaseAddress(subnet.subnet),
+      ...subnet.ips
+    ].filter((ip, idx, all) => ip && !ip.includes(':') && all.indexOf(ip) === idx)
+      .slice(0, SUBNET_HOSTNAME_CANDIDATE_LIMIT);
+
+    for (const ip of candidates) {
+      const hostname = await fetchPtrHostname(ip);
+      if (hostname) return hostname;
+    }
+
+    return '';
+  }
+
+  async function fetchPtrHostname(ip) {
+    const ptrName = ip.split('.').reverse().join('.') + '.in-addr.arpa';
+    try {
+      const response = await fetch(`${DNS_ENDPOINT}?name=${encodeURIComponent(ptrName)}&type=PTR`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/dns-json' }
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+      const data = await response.json();
+      const ptr = data.Answer?.find(a => a.type === 12 && a.data)?.data || '';
+      return ptr.replace(/\.$/, '');
+    } catch (e) {
+      console.warn(`PTR lookup failed for ${ip}:`, e.message);
+      return '';
+    }
+  }
+
+  function subnetBaseAddress(subnet) {
+    return String(subnet).split('/')[0];
   }
 
   // ───────────────────────────────────────────────
@@ -502,12 +581,14 @@ import { analyze } from "./parser.js";
 
   function resetUI() {
     geoLookupRunId++;
+    subnetHostnameLookupRunId++;
     document.getElementById('upload-section').style.display = 'block';
     document.getElementById('results').style.display = 'none';
     document.getElementById('header-stats').style.display = 'none';
     document.getElementById('geo-progress-wrap').style.display = 'none';
     analysisData = null;
     geoData = {};
+    subnetHostnames = {};
     expandedIPs = new Set();
   }
 

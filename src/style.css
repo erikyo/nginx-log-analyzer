@@ -365,8 +365,18 @@ td { padding: 9px 14px; vertical-align: middle; }
 .flag-img { width: 16px; height: 16px; border-radius: 50%; vertical-align: -3px; box-shadow: 0 0 0 1px rgba(255,255,255,0.08); }
 .geo-flag { margin-right: 6px; }
 .ip-flag { display: inline-block; width: 22px; margin-right: 6px; text-align: center; }
-.subnet-title { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.subnet-title { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 8px; }
 .subnet-title h4 { margin-bottom: 0; }
+.subnet-heading { min-width: 0; }
+.subnet-hostname {
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.35;
+    margin-top: 3px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
 .subnet-flags { display: inline-flex; align-items: center; gap: 3px; min-width: 18px; white-space: nowrap; }
 .subnet-flags .flag-img { width: 15px; height: 15px; }
 
