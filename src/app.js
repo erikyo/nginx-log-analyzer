@@ -18,15 +18,14 @@ import { analyze } from "./parser.js";
   const geoCacheReady = registerGeoCacheWorker();
 
   async function registerGeoCacheWorker() {
-    if (!('serviceWorker' in navigator)) return false;
+    if (!('serviceWorker' in navigator)) return null;
 
     try {
       await navigator.serviceWorker.register('./sw.js');
-      await navigator.serviceWorker.ready;
-      return true;
+      return await navigator.serviceWorker.ready;
     } catch (e) {
       console.warn('GeoIP service worker registration failed:', e.message);
-      return false;
+      return null;
     }
   }
 
@@ -393,6 +392,27 @@ import { analyze } from "./parser.js";
     }
   }
 
+  async function loadCachedGeoIPData(ips) {
+    if (!('serviceWorker' in navigator)) return [];
+
+    const registration = await geoCacheReady;
+    const worker = navigator.serviceWorker.controller || registration?.active;
+    if (!worker || !Array.isArray(ips) || ips.length === 0) return [];
+
+    return new Promise(resolve => {
+      const channel = new MessageChannel();
+      const timeout = setTimeout(() => resolve([]), 2000);
+
+      channel.port1.onmessage = event => {
+        clearTimeout(timeout);
+        const results = event.data?.results;
+        resolve(Array.isArray(results) ? results : []);
+      };
+
+      worker.postMessage({ type: 'GET_CACHED_GEOIPS', ips }, [channel.port2]);
+    });
+  }
+
   async function startGeoLookup() {
     if (!analysisData) return;
     const runId = ++geoLookupRunId;
@@ -401,8 +421,17 @@ import { analyze } from "./parser.js";
     let done = 0;
 
     updateGeoProgress(done, ips.length, 'Geo lookup starting');
-    await geoCacheReady;
+    const cachedResults = await loadCachedGeoIPData(ips);
     if (runId !== geoLookupRunId) return;
+    if (cachedResults.length > 0) {
+      for (const r of cachedResults) {
+        geoData[r.ipAddress] = r;
+      }
+      done = ips.filter(ip => geoData[ip]).length;
+      updateGeoProgress(done, ips.length, `Loaded ${done}/${ips.length} cached geo records`);
+      renderIPTable();
+      renderSubnets();
+    }
 
     await fetchGeoIPClientSide(ips, runId, (results, processed) => {
       if (runId !== geoLookupRunId) return;

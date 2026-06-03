@@ -22,6 +22,16 @@ self.addEventListener("fetch", (event) => {
 	event.respondWith(cacheGeoIPRequest(request));
 });
 
+self.addEventListener("message", (event) => {
+	if (event.data?.type !== "GET_CACHED_GEOIPS" || !event.ports[0]) return;
+
+	event.waitUntil(
+		getCachedGeoIPs(event.data.ips).then((results) => {
+			event.ports[0].postMessage({ type: "CACHED_GEOIPS", results });
+		}),
+	);
+});
+
 async function cacheGeoIPRequest(request) {
 	const cache = await caches.open(GEO_CACHE);
 	const cached = await cache.match(request, { ignoreSearch: false });
@@ -33,6 +43,31 @@ async function cacheGeoIPRequest(request) {
 	}
 
 	return withCacheStatus(response, "miss");
+}
+
+async function getCachedGeoIPs(ips) {
+	if (!Array.isArray(ips) || ips.length === 0) return [];
+
+	const cache = await caches.open(GEO_CACHE);
+	const cached = [];
+
+	for (const ip of ips) {
+		const requestUrl = `${GEO_ENDPOINT_ORIGIN}${GEO_ENDPOINT_PATH}${encodeURIComponent(ip)}`;
+		const response = await cache.match(requestUrl, { ignoreSearch: false });
+		if (!response) continue;
+
+		try {
+			const data = await response.json();
+			cached.push({
+				...data,
+				ipAddress: data.ipAddress || ip,
+			});
+		} catch (error) {
+			console.warn(`Cached GeoIP data could not be read for ${ip}:`, error);
+		}
+	}
+
+	return cached;
 }
 
 function withCacheStatus(response, status) {
