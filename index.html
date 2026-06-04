@@ -36,7 +36,13 @@
 
     <div class="or-divider">or paste below</div>
 
-    <textarea id="log-input" placeholder='192.168.1.1 - - [01/Jan/2025:12:00:00 +0000] "GET / HTTP/1.1" 200 1234 "-" "Mozilla/5.0 ..."&#10;10.0.0.1 - - [01/Jan/2025:12:00:01 +0000] "GET /wp-admin HTTP/1.1" 404 162 "-" "sqlmap/1.0"'></textarea>
+    <textarea id="log-input" class="log-textarea" placeholder='192.168.1.1 - - [01/Jan/2025:12:00:00 +0000] "GET / HTTP/1.1" 200 1234 "-" "Mozilla/5.0 ..."&#10;10.0.0.1 - - [01/Jan/2025:12:00:01 +0000] "GET /wp-admin HTTP/1.1" 404 162 "-" "sqlmap/1.0"'></textarea>
+
+    <div class="log-field-head">
+      <div class="section-label">Optional Apache/nginx error log</div>
+      <span>ModSecurity, proxy_fcgi, timeout and server errors</span>
+    </div>
+    <textarea id="error-log-input" class="log-textarea error-log-textarea" placeholder='[Thu Jun 04 17:01:27.407479 2026] [security2:error] [pid 1524715:tid 140626976806656] [client 136.111.226.92:0] ModSecurity: Access denied with code 403 (phase 2). [id "225170"] [msg "COMODO WAF: Sensitive Information Disclosure Vulnerability in WordPress 4.7"] [severity "CRITICAL"] [hostname "example.com"] [uri "/wp-json/wp/v2/users/"]&#10;[Thu Jun 04 16:30:41.641717 2026] [proxy_fcgi:error] [pid 1504794:tid 140627555641088] (70007)The timeout specified has expired: [client 185.251.8.99:0] AH01075: Error dispatching request to : (polling)'></textarea>
 
     <div class="btn-row">
       <button class="btn-primary" id="analyze-btn" onclick="runAnalysis()">Analyze Logs</button>
@@ -61,6 +67,18 @@
         <div class="geo-progress-track"><div class="geo-progress-fill" id="geo-progress-fill"></div></div>
         <span class="geo-progress-text" id="geo-progress-text">Geo lookup pending</span>
       </div>
+    </div>
+
+    <!-- TIMELINE -->
+    <div class="timeline-wrap" id="timeline-wrap">
+      <div class="timeline-head">
+        <div>
+          <div class="section-label">Request timeline</div>
+          <div class="timeline-range" id="timeline-range">All requests</div>
+        </div>
+        <button class="filter-btn" onclick="resetTimeFilter()">Reset time</button>
+      </div>
+      <canvas id="timeline-chart" height="150"></canvas>
     </div>
 
     <!-- TABS -->
@@ -90,6 +108,7 @@
             <th onclick="sortBy('classification')">Class</th>
             <th>Errors</th>
             <th>Scan Hits</th>
+            <th>Error Log</th>
             <th>User Agents</th>
             <th>Geo</th>
             <th></th>
