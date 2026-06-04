@@ -1,9 +1,13 @@
-import { analyze } from "./parser.js";
+import { analyze, analyzeEntries } from "./parser.js";
 
   // ───────────────────────────────────────────────
   // STATE
   // ───────────────────────────────────────────────
   let analysisData = null;
+  let fullAnalysisData = null;
+  let activeTimeRange = null;
+  let timelineState = null;
+  let timelineDrag = null;
   let geoData = {};
   let currentFilter = 'all';
   let currentSort = { col: 'requests', dir: 'desc' };
@@ -59,10 +63,15 @@ import { analyze } from "./parser.js";
   }
 
   document.getElementById('log-input').addEventListener('input', updateLineCount);
+  document.getElementById('error-log-input').addEventListener('input', updateLineCount);
 
   function updateLineCount() {
     const lines = document.getElementById('log-input').value.split('\n').filter(l => l.trim()).length;
-    document.getElementById('line-count').textContent = lines ? `${fmt(lines)} lines` : '';
+    const errorLines = document.getElementById('error-log-input').value.split('\n').filter(l => l.trim()).length;
+    const parts = [];
+    if (lines) parts.push(`${fmt(lines)} access lines`);
+    if (errorLines) parts.push(`${fmt(errorLines)} error lines`);
+    document.getElementById('line-count').textContent = parts.join(' · ');
   }
 
   // ───────────────────────────────────────────────
@@ -70,16 +79,20 @@ import { analyze } from "./parser.js";
   // ───────────────────────────────────────────────
   async function runAnalysis() {
     const text = document.getElementById('log-input').value.trim();
-    if (!text) { alert('Please paste or upload a log file first.'); return; }
+    const errorText = document.getElementById('error-log-input').value.trim();
+    if (!text && !errorText) { alert('Please paste or upload at least one log file first.'); return; }
 
     showLoading('Parsing log entries…');
 
     try {
-      analysisData = analyze(text);
+      fullAnalysisData = analyze(text, errorText);
+      activeTimeRange = null;
+      analysisData = buildFilteredAnalysis();
       geoData = {};
       subnetHostnames = {};
       expandedIPs = new Set();
       renderResults();
+      initTimeline();
       startGeoLookup();
       startSubnetHostnameLookup();
     } catch (err) {
@@ -88,15 +101,53 @@ import { analyze } from "./parser.js";
     }
   }
 
+  function buildFilteredAnalysis() {
+    if (!fullAnalysisData) return null;
+    const entries = activeTimeRange
+      ? fullAnalysisData.entries.filter((entry) => {
+        if (!Number.isFinite(entry.timestamp)) return true;
+        return entry.timestamp >= activeTimeRange.start && entry.timestamp <= activeTimeRange.end;
+      })
+      : fullAnalysisData.entries;
+    const errorEntries = activeTimeRange
+      ? fullAnalysisData.errorEntries.filter((entry) => {
+        if (!Number.isFinite(entry.timestamp)) return true;
+        return entry.timestamp >= activeTimeRange.start && entry.timestamp <= activeTimeRange.end;
+      })
+      : fullAnalysisData.errorEntries;
+
+    return analyzeEntries(
+      entries,
+      fullAnalysisData.meta.skippedLines,
+      fullAnalysisData.meta.totalLines,
+      errorEntries,
+      fullAnalysisData.meta.skippedErrorLines,
+      fullAnalysisData.meta.errorLogLines
+    );
+  }
+
+  function refreshForTimeFilter() {
+    if (!fullAnalysisData) return;
+    analysisData = buildFilteredAnalysis();
+    currentPage = 0;
+    subnetHostnameLookupRunId++;
+    renderSummary();
+    renderTimeline();
+    renderIPTable();
+    renderSubnets();
+    startSubnetHostnameLookup();
+  }
+
+  function resetTimeFilter() {
+    if (!fullAnalysisData?.meta.requestTimeRange?.hasTimestamps) return;
+    activeTimeRange = null;
+    refreshForTimeFilter();
+  }
+
   // ───────────────────────────────────────────────
   // RENDER RESULTS
   // ───────────────────────────────────────────────
-  function renderResults() {
-    hideLoading();
-    document.getElementById('upload-section').style.display = 'none';
-    document.getElementById('results').style.display = 'block';
-    document.getElementById('header-stats').style.display = 'flex';
-
+  function renderSummary() {
     const d = analysisData;
     const attackers = d.ips.filter(i => i.classification === 'attacker').length;
     const suspicious = d.ips.filter(i => i.classification === 'suspicious').length;
@@ -140,11 +191,236 @@ import { analyze } from "./parser.js";
       <div class="card-value">${fmtBytes(d.meta.totalBytes)}</div>
       <div class="card-sub">across all IPs</div>
     </div>
+    <div class="card fade-in ${d.meta.wafBlocks > 0 ? 'danger' : 'ok'}" style="animation-delay:.3s">
+      <div class="card-label">WAF Blocks</div>
+      <div class="card-value">${fmt(d.meta.wafBlocks)}</div>
+      <div class="card-sub">${fmt(d.meta.parsedErrorEntries)} parsed error entries</div>
+    </div>
+    <div class="card fade-in ${d.meta.timeoutErrors > 0 ? 'warn' : 'ok'}" style="animation-delay:.35s">
+      <div class="card-label">Server Errors</div>
+      <div class="card-value">${fmt(d.meta.timeoutErrors)}</div>
+      <div class="card-sub">proxy/timeouts from error log</div>
+    </div>
   `;
+  }
 
+  function renderResults() {
+    hideLoading();
+    document.getElementById('upload-section').style.display = 'none';
+    document.getElementById('results').style.display = 'block';
+    document.getElementById('header-stats').style.display = 'flex';
+
+    renderSummary();
+    renderTimeline();
     renderIPTable();
     renderSubnets();
     document.getElementById('results').classList.add('fade-in');
+  }
+
+  // ───────────────────────────────────────────────
+  // TIMELINE
+  // ───────────────────────────────────────────────
+  function initTimeline() {
+    const canvas = document.getElementById('timeline-chart');
+    if (!canvas || canvas.dataset.bound === '1') {
+      renderTimeline();
+      return;
+    }
+
+    canvas.dataset.bound = '1';
+    canvas.addEventListener('pointerdown', onTimelinePointerDown);
+    canvas.addEventListener('pointermove', onTimelinePointerMove);
+    canvas.addEventListener('pointerup', onTimelinePointerUp);
+    canvas.addEventListener('pointercancel', onTimelinePointerUp);
+    window.addEventListener('resize', renderTimeline);
+    renderTimeline();
+  }
+
+  function renderTimeline() {
+    const wrap = document.getElementById('timeline-wrap');
+    const canvas = document.getElementById('timeline-chart');
+    const label = document.getElementById('timeline-range');
+    if (!wrap || !canvas || !label) return;
+
+    const timeRange = fullAnalysisData?.meta.requestTimeRange;
+    if (!fullAnalysisData || !timeRange?.hasTimestamps) {
+      wrap.style.display = 'none';
+      return;
+    }
+
+    wrap.style.display = 'block';
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.round(rect.width * dpr));
+    canvas.height = Math.max(1, Math.round(rect.height * dpr));
+
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const width = rect.width;
+    const height = rect.height;
+    const pad = { left: 46, right: 18, top: 14, bottom: 30 };
+    const plot = {
+      x: pad.left,
+      y: pad.top,
+      w: Math.max(1, width - pad.left - pad.right),
+      h: Math.max(1, height - pad.top - pad.bottom),
+    };
+    const start = timeRange.first;
+    const end = timeRange.last;
+    const selection = activeTimeRange || { start, end };
+    const bins = buildTimelineBins(start, end, Math.max(24, Math.min(140, Math.floor(plot.w / 8))));
+    const maxCount = Math.max(1, ...bins.map((b) => b.count));
+
+    timelineState = { start, end, plot, width, height };
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = '#111418';
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.strokeStyle = '#1e2530';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 3; i++) {
+      const y = plot.y + (plot.h / 3) * i;
+      ctx.beginPath();
+      ctx.moveTo(plot.x, y);
+      ctx.lineTo(plot.x + plot.w, y);
+      ctx.stroke();
+    }
+
+    const barGap = 1;
+    const barW = Math.max(2, plot.w / bins.length - barGap);
+    for (let i = 0; i < bins.length; i++) {
+      const bin = bins[i];
+      const x = plot.x + i * (plot.w / bins.length);
+      const h = Math.max(1, (bin.count / maxCount) * plot.h);
+      ctx.fillStyle = bin.end < selection.start || bin.start > selection.end ? '#33404f' : '#00d4ff';
+      ctx.fillRect(x, plot.y + plot.h - h, barW, h);
+    }
+
+    const leftX = timeToX(selection.start);
+    const rightX = timeToX(selection.end);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.58)';
+    ctx.fillRect(plot.x, plot.y, Math.max(0, leftX - plot.x), plot.h);
+    ctx.fillRect(rightX, plot.y, Math.max(0, plot.x + plot.w - rightX), plot.h);
+
+    drawTimelineHandle(ctx, leftX, plot.y, plot.h, 'start');
+    drawTimelineHandle(ctx, rightX, plot.y, plot.h, 'end');
+    drawTimelineAxis(ctx, plot, start, end, maxCount);
+
+    const selectedRequests = analysisData?.meta.totalRequests ?? fullAnalysisData.entries.length;
+    label.textContent = `${formatTime(selection.start)} - ${formatTime(selection.end)} · ${fmt(selectedRequests)} requests`;
+  }
+
+  function buildTimelineBins(start, end, count) {
+    const bins = Array.from({ length: count }, (_, i) => ({
+      start: start + ((end - start) * i) / count,
+      end: start + ((end - start) * (i + 1)) / count,
+      count: 0,
+    }));
+
+    const span = Math.max(1, end - start);
+    for (const entry of fullAnalysisData.entries) {
+      if (!Number.isFinite(entry.timestamp)) continue;
+      const idx = Math.min(count - 1, Math.max(0, Math.floor(((entry.timestamp - start) / span) * count)));
+      bins[idx].count++;
+    }
+    return bins;
+  }
+
+  function drawTimelineHandle(ctx, x, y, h) {
+    ctx.fillStyle = '#00d4ff';
+    ctx.fillRect(x - 2, y - 5, 4, h + 10);
+    ctx.fillStyle = '#0a0c0f';
+    ctx.fillRect(x - 7, y + h / 2 - 11, 14, 22);
+    ctx.strokeStyle = '#00d4ff';
+    ctx.strokeRect(x - 7.5, y + h / 2 - 11.5, 15, 23);
+    ctx.fillStyle = '#00d4ff';
+    ctx.fillRect(x - 3, y + h / 2 - 6, 1, 12);
+    ctx.fillRect(x + 2, y + h / 2 - 6, 1, 12);
+  }
+
+  function drawTimelineAxis(ctx, plot, start, end, maxCount) {
+    ctx.fillStyle = '#5a6476';
+    ctx.font = '10px IBM Plex Mono, monospace';
+    ctx.textBaseline = 'top';
+    ctx.fillText(String(maxCount), 8, plot.y - 1);
+    ctx.fillText('0', 28, plot.y + plot.h - 8);
+    for (let i = 0; i <= 4; i++) {
+      const t = start + ((end - start) * i) / 4;
+      const text = formatTick(t);
+      const x = plot.x + (plot.w * i) / 4;
+      ctx.textAlign = i === 0 ? 'left' : i === 4 ? 'right' : 'center';
+      ctx.fillText(text, x, plot.y + plot.h + 9);
+    }
+    ctx.textAlign = 'left';
+  }
+
+  function onTimelinePointerDown(event) {
+    if (!timelineState) return;
+    if (!activeTimeRange) {
+      activeTimeRange = { start: timelineState.start, end: timelineState.end };
+    }
+    const x = event.offsetX;
+    const leftX = timeToX(activeTimeRange.start);
+    const rightX = timeToX(activeTimeRange.end);
+    timelineDrag = Math.abs(x - leftX) <= Math.abs(x - rightX) ? 'start' : 'end';
+    event.currentTarget.setPointerCapture(event.pointerId);
+    updateTimelineDrag(x);
+  }
+
+  function onTimelinePointerMove(event) {
+    if (!timelineDrag) return;
+    updateTimelineDrag(event.offsetX);
+  }
+
+  function onTimelinePointerUp(event) {
+    if (!timelineDrag) return;
+    timelineDrag = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    refreshForTimeFilter();
+  }
+
+  function updateTimelineDrag(x) {
+    const { start, end } = timelineState;
+    const minSpan = Math.max(1000, (end - start) / 400);
+    const next = xToTime(x);
+
+    if (timelineDrag === 'start') {
+      activeTimeRange.start = Math.min(Math.max(start, next), activeTimeRange.end - minSpan);
+    } else {
+      activeTimeRange.end = Math.max(Math.min(end, next), activeTimeRange.start + minSpan);
+    }
+
+    analysisData = buildFilteredAnalysis();
+    renderTimeline();
+  }
+
+  function timeToX(time) {
+    const { start, end, plot } = timelineState;
+    return plot.x + ((time - start) / Math.max(1, end - start)) * plot.w;
+  }
+
+  function xToTime(x) {
+    const { start, end, plot } = timelineState;
+    const pct = Math.max(0, Math.min(1, (x - plot.x) / plot.w));
+    return start + (end - start) * pct;
+  }
+
+  function formatTime(ms) {
+    return new Date(ms).toLocaleString(undefined, {
+      month: 'short',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  }
+
+  function formatTick(ms) {
+    return new Date(ms).toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
   }
 
   // ───────────────────────────────────────────────
@@ -187,8 +463,15 @@ import { analyze } from "./parser.js";
       ips = ips.filter(i => {
         const geo = geoData[i.ip];
         const geoStr = geo ? `${geo.countryName||''} ${geo.cityName||''} ${geo.regionName||''} ${geo.asnOrganization||''}`.toLowerCase() : '';
+        const errorStr = [
+          ...(i.wafRules || []),
+          ...(i.wafMessages || []),
+          ...(i.errorUris || []),
+          ...(i.errorModules || [])
+        ].join(' ').toLowerCase();
         return i.ip.includes(q) ||
           i.userAgents.some(ua => ua.toLowerCase().includes(q)) ||
+          errorStr.includes(q) ||
           geoStr.includes(q);
       });
     }
@@ -209,7 +492,7 @@ import { analyze } from "./parser.js";
     const ips = getFilteredIPs();
     document.getElementById('ip-count').textContent = `${ips.length} IP${ips.length !== 1 ? 's' : ''}`;
 
-    const maxRequests = analysisData ? Math.max(...analysisData.ips.map(i => i.requests)) : 1;
+    const maxRequests = analysisData ? Math.max(1, ...analysisData.ips.map(i => i.requests)) : 1;
     const tbody = document.getElementById('ip-tbody');
     const page = ips.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
 
@@ -217,12 +500,14 @@ import { analyze } from "./parser.js";
       const geo = geoData[ip.ip];
       const isExpanded = expandedIPs.has(ip.ip);
       const flag = geo ? flagImage(geo.countryCode, geo.countryName) : '';
-      const geoCell = geo
-        ? `<span class="geo-flag">${flag}</span>${[geo.cityName, geo.regionName, geo.countryName].filter(Boolean).join(', ')}`
-        : `<span class="geo-loading">—</span>`;
+      const geoCell = renderGeoCell(ip.ip);
 
       const errorRate = ip.requests > 0 ? (ip.errors / ip.requests * 100).toFixed(0) : 0;
       const scanRate = ip.requests > 0 ? (ip.scanPatterns / ip.requests * 100).toFixed(0) : 0;
+      const errorLogCount = ip.serverErrors || 0;
+      const errorLogLabel = errorLogCount
+        ? `${fmt(errorLogCount)} <span style="font-size:10px;color:var(--text-dim)">(${fmt(ip.wafBlocks || 0)} WAF)</span>`
+        : '0';
       const threatColor = ip.threatScore >= 70 ? 'var(--red)' : ip.threatScore >= 35 ? 'var(--orange)' : 'var(--green)';
 
       return `
@@ -230,7 +515,10 @@ import { analyze } from "./parser.js";
       <td><strong style="color:var(--text-bright)">${fmt(ip.requests)}</strong></td>
       <td class="bytes-cell">${fmtBytes(ip.bytes)}</td>
       <td class="ip-cell">
-        <span class="ip-flag">${flag}</span><a href="https://www.shodan.io/host/${ip.ip}" target="_blank" rel="noopener" title="Shodan lookup">${ip.ip}</a>
+        <span class="ip-flag">${flag}</span>
+        <a href="https://www.abuseipdb.com/check/${ip.ip}" target="_blank" rel="noopener" title="AbuseIPDB">
+          ${ip.ip}
+        </a>
       </td>
       <td>
         <div class="threat-bar-wrap">
@@ -241,12 +529,13 @@ import { analyze } from "./parser.js";
       <td><span class="badge badge-${ip.classification}">${ip.classification}</span></td>
       <td style="color:${ip.errors > 0 ? 'var(--orange)' : 'var(--text-dim)'}">${fmt(ip.errors)} <span style="font-size:10px;color:var(--text-dim)">(${errorRate}%)</span></td>
       <td style="color:${ip.scanPatterns > 0 ? 'var(--red)' : 'var(--text-dim)'}">${ip.scanPatterns} <span style="font-size:10px;color:var(--text-dim)">(${scanRate}%)</span></td>
+      <td style="color:${errorLogCount > 0 ? 'var(--red)' : 'var(--text-dim)'}">${errorLogLabel}</td>
       <td style="color:var(--text-dim);font-size:11px">${ip.userAgents.length}</td>
       <td class="geo-cell">${geoCell}</td>
       <td><button class="expand-btn" onclick="toggleDetail('${ip.ip}')">${isExpanded ? '▲' : '▼'}</button></td>
     </tr>
     <tr class="detail-row" id="detail-${safeId(ip.ip)}" ${isExpanded ? '' : 'style="display:none"'}>
-      <td colspan="10">
+      <td colspan="11">
         <div class="detail-inner">
           <div class="detail-section">
             <h4>Sample Requests</h4>
@@ -259,6 +548,10 @@ import { analyze } from "./parser.js";
               <h4>Status Codes</h4>
               <pre>${Object.entries(ip.statuses).map(([k,v]) => `${k}: ${v}`).join('\n')}</pre>
             </div>
+          </div>
+          <div class="detail-section">
+            <h4>Error Log Evidence</h4>
+            <pre>${escHtml(formatErrorEvidence(ip))}</pre>
           </div>
         </div>
       </td>
@@ -274,6 +567,35 @@ import { analyze } from "./parser.js";
     <span>Page ${currentPage + 1} / ${totalPages} &nbsp;(${ips.length} total)</span>
     <button class="filter-btn" onclick="changePage(1)" ${currentPage >= totalPages - 1 ? 'disabled' : ''}>Next →</button>
   `;
+  }
+
+  function renderGeoCell(ip) {
+    const geo = geoData[ip];
+    if (!geo) return `<span class="geo-loading">-</span>`;
+
+    const flag = flagImage(geo.countryCode, geo.countryName);
+    const location = [geo.cityName, geo.regionName, geo.countryName].filter(Boolean).join(', ');
+    return `<span class="geo-flag">${flag}</span>${escHtml(location)}`;
+  }
+
+  function updateGeoIPRows(results) {
+    for (const result of results) {
+      const ip = result?.ipAddress;
+      if (!ip) continue;
+      updateGeoIPRow(ip);
+    }
+  }
+
+  function updateGeoIPRow(ip) {
+    const row = document.getElementById(`row-${safeId(ip)}`);
+    if (!row) return;
+
+    const geoCell = row.querySelector('.geo-cell');
+    if (geoCell) geoCell.innerHTML = renderGeoCell(ip);
+
+    const geo = geoData[ip];
+    const flagCell = row.querySelector('.ip-flag');
+    if (flagCell) flagCell.innerHTML = geo ? flagImage(geo.countryCode, geo.countryName) : '';
   }
 
   function changePage(dir) {
@@ -314,8 +636,10 @@ import { analyze } from "./parser.js";
     <div class="subnet-card">
       <div class="subnet-title">
         <span class="subnet-flags">${flags}</span>
-        <div class="subnet-heading">
-          <h4>${s.subnet}</h4>
+        <div class="subnet-heading ip-cell">
+          <a href="https://www.abuseipdb.com/check-block/${s.subnet}">
+            ${s.subnet}
+          </a>
           <div class="subnet-hostname">${subnetHostnameLabel(s)}</div>
         </div>
       </div>
@@ -508,7 +832,7 @@ import { analyze } from "./parser.js";
       }
       done = ips.filter(ip => geoData[ip]).length;
       updateGeoProgress(done, ips.length, `Loaded ${done}/${ips.length} cached geo records`);
-      renderIPTable();
+      updateGeoIPRows(cachedResults);
       renderSubnets();
     }
 
@@ -519,7 +843,7 @@ import { analyze } from "./parser.js";
       }
       done = processed;
       updateGeoProgress(done, ips.length, `Geo lookup ${done}/${ips.length}`);
-      renderIPTable(); // refresh geo column
+      updateGeoIPRows(results);
       renderSubnets();
     });
 
@@ -561,7 +885,11 @@ import { analyze } from "./parser.js";
 10.0.0.5 - - [01/Jun/2025:10:04:00 +0000] "GET / HTTP/1.1" 200 4523 "-" "Mozilla/5.0 Firefox/115"
 10.0.0.5 - - [01/Jun/2025:10:04:10 +0000] "GET /contact HTTP/1.1" 200 1900 "https://example.com" "Mozilla/5.0 Firefox/115"
 `.trim();
+    const errorSample = `[Thu Jun 04 16:30:41.641717 2026] [proxy_fcgi:error] [pid 1504794:tid 140627555641088] (70007)The timeout specified has expired: [client 185.251.8.99:0] AH01075: Error dispatching request to : (polling), referer: https://www.google.com/
+[Thu Jun 04 17:01:27.407479 2026] [security2:error] [pid 1524715:tid 140626976806656] [client 185.220.101.45:0] ModSecurity: Access denied with code 403 (phase 2). Operator EQ matched 0 at REQUEST_COOKIES_NAMES. [file "/etc/apache2/modsecurity.d/rules/comodo_free/26_Apps_WordPress.conf"] [line "155"] [id "225170"] [rev "3"] [msg "COMODO WAF: Sensitive Information Disclosure Vulnerability in WordPress 4.7 (CVE-2017-5487)||codekraft.it|F|2"] [severity "CRITICAL"] [tag "CWAF"] [tag "WordPress"] [hostname "codekraft.it"] [uri "/wp-json/wp/v2/users/"] [unique_id "aiGvZ1qjBXdJJZ5unk3vhAAAABc"]
+[Thu Jun 04 17:01:30.507128 2026] [security2:error] [pid 1504794:tid 140627245242112] [client 185.220.101.45:0] ModSecurity: Access denied with code 403 (phase 2). Operator EQ matched 0 at IP. [file "/etc/apache2/modsecurity.d/rules/comodo_free/30_Apps_OtherApps.conf"] [line "5956"] [id "240335"] [rev "5"] [msg "COMODO WAF: XML-RPC Attack Identified (CVE-2013-0235)|Source 185.220.101.45 (+1 hits since last alert)|codekraft.it|F|2"] [severity "CRITICAL"] [tag "CWAF"] [tag "OtherApps"] [hostname "codekraft.it"] [uri "/xmlrpc.php"] [unique_id "aiGvarrMKlVa8AfcLAKw4AAAAJA"]`;
     document.getElementById('log-input').value = sample;
+    document.getElementById('error-log-input').value = errorSample;
     updateLineCount();
   }
 
@@ -587,6 +915,10 @@ import { analyze } from "./parser.js";
     document.getElementById('header-stats').style.display = 'none';
     document.getElementById('geo-progress-wrap').style.display = 'none';
     analysisData = null;
+    fullAnalysisData = null;
+    activeTimeRange = null;
+    timelineState = null;
+    timelineDrag = null;
     geoData = {};
     subnetHostnames = {};
     expandedIPs = new Set();
@@ -607,6 +939,35 @@ import { analyze } from "./parser.js";
 
   function safeId(ip) { return ip.replace(/[.:/]/g, '_'); }
   function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  function formatErrorEvidence(ip) {
+    if (!ip.serverErrors) return 'none';
+
+    const lines = [
+      `error log entries: ${fmt(ip.serverErrors)}`,
+      `waf blocks: ${fmt(ip.wafBlocks || 0)}`,
+      `timeouts: ${fmt(ip.timeoutErrors || 0)}`
+    ];
+
+    if (ip.errorModules?.length) lines.push(`modules: ${ip.errorModules.join(', ')}`);
+    if (ip.wafRules?.length) lines.push(`rule ids: ${ip.wafRules.join(', ')}`);
+    if (ip.errorUris?.length) lines.push(`uris: ${ip.errorUris.slice(0, 8).join(', ')}`);
+    if (ip.wafMessages?.length) {
+      lines.push('messages:');
+      lines.push(...ip.wafMessages.slice(0, 5).map((msg) => `- ${msg}`));
+    }
+    if (ip.errorSamples?.length) {
+      lines.push('samples:');
+      lines.push(...ip.errorSamples.slice(0, 6).map((entry) => {
+        const uri = entry.uri ? ` ${entry.uri}` : '';
+        const rule = entry.ruleId ? ` rule ${entry.ruleId}` : '';
+        const status = entry.status ? ` status ${entry.status}` : '';
+        return `- ${entry.time} [${entry.module}:${entry.level}]${status}${rule}${uri} ${entry.message}`;
+      }));
+    }
+
+    return lines.join('\n');
+  }
 
   function updateGeoProgress(done, total, label) {
     const wrap = document.getElementById('geo-progress-wrap');
@@ -652,6 +1013,7 @@ Object.assign(window, {
   loadSample,
   showTab,
   renderIPTable,
+  resetTimeFilter,
   setFilter,
   sortBy,
   toggleDetail,
