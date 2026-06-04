@@ -140,7 +140,7 @@ main {
 .or-divider::before { left: 0; }
 .or-divider::after { right: 0; }
 
-textarea#log-input {
+textarea.log-textarea {
     width: 100%;
     height: 220px;
     background: var(--surface);
@@ -155,8 +155,22 @@ textarea#log-input {
     transition: border-color 0.2s;
     line-height: 1.6;
 }
-textarea#log-input:focus { border-color: var(--accent-dim); }
-textarea#log-input::placeholder { color: var(--text-dim); }
+textarea.log-textarea:focus { border-color: var(--accent-dim); }
+textarea.log-textarea::placeholder { color: var(--text-dim); }
+.error-log-textarea { height: 170px; }
+.log-field-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: baseline;
+    margin-top: 18px;
+}
+.log-field-head .section-label { margin-bottom: 8px; }
+.log-field-head span {
+    color: var(--text-dim);
+    font-size: 11px;
+    text-align: right;
+}
 
 .btn-row { display: flex; gap: 10px; margin-top: 14px; align-items: center; }
 
@@ -401,7 +415,7 @@ td { padding: 9px 14px; vertical-align: middle; }
 .detail-inner {
     padding: 16px 20px;
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 20px;
 }
 .detail-section h4 {
@@ -476,14 +490,32 @@ td { padding: 9px 14px; vertical-align: middle; }
 .subnet-bar-fill { height: 100%; background: var(--accent); border-radius: 2px; }
 
 /* ─── TIMELINE ─── */
-.timeline-wrap { margin-bottom: 20px; }
+.timeline-wrap {
+    padding: 22px 28px 0;
+    touch-action: none;
+}
+.timeline-head {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 10px;
+}
+.timeline-head .section-label { margin-bottom: 5px; }
+.timeline-range {
+    color: var(--text-bright);
+    font-size: 12px;
+    line-height: 1.4;
+}
 canvas#timeline-chart {
     width: 100%;
-    height: 120px;
+    height: 150px;
     display: block;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--surface);
+    cursor: crosshair;
+    user-select: none;
 }
 
 /* ─── EMPTY STATE ─── */
@@ -503,3 +535,15 @@ canvas#timeline-chart {
 /* ─── ANIMATIONS ─── */
 @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 .fade-in { animation: fadeIn 0.3s ease forwards; }
+
+@media (max-width: 900px) {
+    .detail-inner { grid-template-columns: 1fr; }
+    .log-field-head {
+        display: block;
+    }
+    .log-field-head span {
+        display: block;
+        text-align: left;
+        margin: -4px 0 8px;
+    }
+}
